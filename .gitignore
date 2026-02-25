@@ -18,3 +18,7 @@ build/
 # Misc
 .DS_Store
 *.log
+
+# Background runner
+bg_run_*.log
+experiment_bg.pid

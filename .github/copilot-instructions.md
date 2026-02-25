@@ -30,7 +30,8 @@ Automated benchmarking system for Intel XPU vLLM inference across multiple model
 │   └── YYYYMMDD_HHMM/          # Timestamped run directory
 │       ├── *_results.json      # Individual experiment results
 │       ├── summary.txt         # Run summary
-│       ├── detailed_analysis.txt
+│       ├── detailed_analysis.txt  # Formatted human-readable analysis report
+│       ├── raw_results.json    # Raw JSON dump of all result data
 │       ├── results_summary.csv
 │       └── logs/
 └── sanity_test_results/        # Created at runtime (sanity tests, same structure)
@@ -153,7 +154,7 @@ os.chmod(script, 0o755)
 subprocess.Popen(["bash", "--login", script], ...)
 ```
 
-### 10. Health Check Implementation
+### 11. Health Check Implementation
 **RULE**: Use curl -f and don't require non-empty response body
 - The /health endpoint returns 200 OK with empty body (valid)
 - Use `curl -f` to fail on HTTP errors (4xx, 5xx)
@@ -167,7 +168,7 @@ if result.returncode == 0:  # Don't check result.stdout.strip()
     return True
 ```
 
-### 11. Benchmark Result Validation
+### 12. Benchmark Result Validation
 **RULE**: Use correct JSON field names from vllm bench output
 - Use 'completed' for successful requests (not 'num_successes')
 - Use 'failed' for failed requests (not 'num_failures')
@@ -183,7 +184,7 @@ if failed_requests > 0 or successful_requests == 0:
     raise Exception(f"Benchmark had {failed_requests} failures, {successful_requests} successes")
 ```
 
-### 12. Server Startup Monitoring
+### 13. Server Startup Monitoring
 **RULE**: Monitor vllm process health during startup, show logs on failure
 - Check if process is running with `pgrep -f 'vllm serve'`
 - Periodically verify process hasn't died during long startups
@@ -201,7 +202,7 @@ def wait_for_server(self) -> bool:
         return False
 ```
 
-### 13. Benchmark Host Configuration
+### 14. Benchmark Host Configuration
 **RULE**: Use `0.0.0.0` as the --host for benchmark client connections (matches official.sh)
 - ✅ CORRECT: `--host 0.0.0.0` (as used in official Intel reference script)
 - Server binds to `0.0.0.0:8000`, benchmark client connects to same
@@ -216,7 +217,7 @@ def build_benchmark_command(self, config: ExperimentConfig) -> str:
         ..."""
 ```
 
-### 14. Clean Up Before Experiments
+### 15. Clean Up Before Experiments
 **RULE**: Always kill previous vLLM servers AND benchmark processes before starting
 - Kill both `vllm serve` and `vllm bench` processes
 - Benchmark processes can hang and consume resources
@@ -240,7 +241,7 @@ def stop_vllm_server(self):
     time.sleep(5)
 ```
 
-### 15. Timestamped Result Directories
+### 16. Timestamped Result Directories
 **RULE**: Create timestamped subdirectories for each experiment run in Israel Time
 - Use `ZoneInfo("Asia/Jerusalem")` for timezone
 - Format: `YYYYMMDD_HHMM` (e.g., `20260225_1430`)
@@ -258,6 +259,14 @@ base_results_dir = Path(results_dir)
 self.results_dir = base_results_dir / timestamp
 self.results_dir.mkdir(parents=True, exist_ok=True)
 ```
+
+### 17. analyze_results.py Output Files
+**RULE**: `analyze_results.py` writes three output files per results directory:
+- `detailed_analysis.txt` — full formatted human-readable report: overall stats, per-model table, best configs per model, and best configs overall
+- `raw_results.json` — raw JSON array of `{filename, config, data}` for every result file
+- `results_summary.csv` — one row per experiment, spreadsheet-friendly
+
+The same formatted content is also printed to stdout (and captured in `bg_run_*.log`).
 
 ## Configuration Parameters
 
@@ -374,11 +383,33 @@ kill $(cat experiment_bg.pid)     # stop
 
 ## Development Guidelines
 
+### Keeping Docs in Sync (REQUIRED after any non-trivial change)
+
+After modifying any script or behaviour, update the affected docs **in the same session**:
+
+| Change type | Files to update |
+|---|---|
+| New CLI flag or parameter | `copilot-instructions.md` (Configuration Parameters + Architecture Notes), `EXPERIMENT_AUTOMATION.md` (Configuration section + defaults table), `QUICK_REFERENCE.md` (examples + defaults table) |
+| New script or file | `copilot-instructions.md` (repo structure tree + Architecture Notes), `QUICK_REFERENCE.md` (Files table), `EXPERIMENT_AUTOMATION.md` (Quick Start or relevant section) |
+| New rule / learned correction | `copilot-instructions.md` (add numbered rule under Critical Rules & Corrections) |
+| Deleted file | Remove **all** references from `copilot-instructions.md`, `EXPERIMENT_AUTOMATION.md`, `QUICK_REFERENCE.md` |
+| Changed default values | `copilot-instructions.md` (Configuration Parameters), `EXPERIMENT_AUTOMATION.md` (defaults blocks), `QUICK_REFERENCE.md` (Default Parameters table) |
+| Output file added/removed | `copilot-instructions.md` (repo structure tree + Rule 17), `EXPERIMENT_AUTOMATION.md` (Output Structure section) |
+
+**`copilot-instructions.md` update checklist:**
+1. Repo structure tree — add/remove/rename files
+2. Critical Rules — add a new numbered rule if a bug or correction was learned
+3. Configuration Parameters — update defaults
+4. Common Commands — update examples
+5. Architecture Notes — update component descriptions
+6. Future Enhancements — mark items `[x]` when completed
+7. Bump **Last Updated** line with date and a one-line summary of what changed
+
 ### When Adding New Features
 1. Update `run_experiments.py` for experiment logic
 2. Update `experiment_utils.py` for utility commands
 3. Update `analyze_results.py` for new metrics
-4. Update both `EXPERIMENT_AUTOMATION.md` and `QUICK_REFERENCE.txt`
+4. Update `EXPERIMENT_AUTOMATION.md`, `QUICK_REFERENCE.md`, and `copilot-instructions.md` (see checklist above)
 5. Test with a single experiment first
 
 ### When Modifying Configurations
@@ -404,7 +435,7 @@ This repository follows the user's global instructions:
 
 ## Future Enhancements (Planned)
 
-- [ ] Resume capability for interrupted runs
+- [x] Resume capability for interrupted runs (`--resume` / `run_background.sh`)
 - [ ] Parallel experiment execution (multiple GPUs)
 - [ ] Real-time web dashboard for monitoring
 - [ ] Automatic optimal configuration recommendation
@@ -426,5 +457,5 @@ This repository follows the user's global instructions:
 
 ---
 
-**Last Updated**: February 25, 2026
+**Last Updated**: February 25, 2026 (session 2 — added run_background.sh, --resume, --max-model-len, raw_results.json, per-model best configs)
 **Primary Maintainer**: Senior Software Engineer, Intel

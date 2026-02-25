@@ -103,8 +103,9 @@ Or specify a custom results directory:
 
 This generates:
 - Console output with statistics and comparisons
-- `detailed_analysis.txt` - Full details of all experiments
-- `results_summary.csv` - Spreadsheet-friendly format
+- `detailed_analysis.txt` — Formatted human-readable report (overall stats, per-model table, best configs per model, best configs overall)
+- `raw_results.json` — Raw JSON array of all result data
+- `results_summary.csv` — Spreadsheet-friendly format
 
 ## Output Structure
 
@@ -112,7 +113,8 @@ This generates:
 experiment_results/
 └── YYYYMMDD_HHMM/                                            # Timestamped run dir
     ├── summary.txt                                           # Overall summary
-    ├── detailed_analysis.txt                                 # Detailed analysis
+    ├── detailed_analysis.txt                                 # Formatted human-readable report
+    ├── raw_results.json                                      # Raw JSON dump of all results
     ├── results_summary.csv                                   # CSV export
     ├── openai_gpt-oss-20b_tp2_quant-none_eager-true_results.json
     ├── openai_gpt-oss-20b_tp2_quant-none_eager-false_results.json
@@ -336,7 +338,7 @@ Use CLI flags (no code edits needed):
 
 ```
 ========================================
-Starting experiment: openai_gpt-oss-20b_tp4_quant-off_eager-true
+Starting experiment: openai_gpt-oss-20b_tp4_quant-none_eager-true
 Model: openai/gpt-oss-20b
 Tensor Parallelism: 4
 Quantization: off
@@ -346,7 +348,7 @@ Enforce Eager: true
 [2026-02-24 10:30:20] Waiting for vLLM server to be ready (timeout: 300s)...
 [2026-02-24 10:31:45] ✓ Server is ready!
 [2026-02-24 10:31:45] Running benchmark...
-[2026-02-24 10:45:12] ✓ Experiment completed successfully: openai_gpt-oss-20b_tp4_quant-off_eager-true
+[2026-02-24 10:45:12] ✓ Experiment completed successfully: openai_gpt-oss-20b_tp4_quant-none_eager-true
 [2026-02-24 10:45:12] Throughput: 2543.67, Mean Latency: 125.34
 ```
 
@@ -366,8 +368,8 @@ Total Duration: 8h 15m 32s
 
 Successful Experiments:
 ----------------------
-  ✓ openai_gpt-oss-20b_tp2_quant-off_eager-true
-  ✓ openai_gpt-oss-20b_tp2_quant-off_eager-false
+  ✓ openai_gpt-oss-20b_tp2_quant-none_eager-true
+  ✓ openai_gpt-oss-20b_tp2_quant-none_eager-false
   ... (32 more)
 
 Failed Experiments:
