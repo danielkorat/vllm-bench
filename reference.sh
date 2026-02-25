@@ -11,7 +11,7 @@ docker run -t -d --shm-size 10g --net=host --ipc=host --privileged \
   --device /dev/dri:/dev/dri \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -v /dev/dri/by-path:/dev/dri/by-path \
-  -v /root/dkorat/deep-research/:/root/deep-research \
+  -v /root/dkorat/vllm-bench/:/root/deep-research \
   --entrypoint= intel/vllm:0.14.1-xpu /bin/bash
 
 # Run command
