@@ -68,6 +68,23 @@ This will:
 - Generate a summary report
 - Create detailed logs for each run
 
+### Run in Background (with resume)
+
+```bash
+./run_background.sh
+```
+
+Launches the full suite detached from the terminal. If a partial run already
+exists in `./experiment_results/` it automatically resumes (skips experiments
+that already have a result file). Output is tee'd to a timestamped log file.
+
+```bash
+./run_background.sh --no-resume              # force a completely fresh run
+./run_background.sh --models openai/gpt-oss-20b    # pass any run_experiments.py args
+tail -f bg_run_*.log                          # follow live output
+kill $(cat experiment_bg.pid)                 # stop the run
+```
+
 **Expected Duration**: Several hours (depends on model sizes and hardware)
 
 ### Analyze Results
@@ -129,8 +146,14 @@ Customize experiments using command-line options:
 # Override benchmark parameters directly
 ./run_experiments.py --input-len 512 --output-len 512 --concurrency 16 --num-prompts 80
 
+# Override max model context length
+./run_experiments.py --max-model-len 4096
+
 # Adjust timeouts
 ./run_experiments.py --timeout-startup 600 --timeout-benchmark 3600
+
+# Resume a partial run (skip experiments that already have results)
+./run_experiments.py --resume
 
 # See all options
 ./run_experiments.py --help
@@ -149,6 +172,7 @@ input_len       = 1024
 output_len      = 1024
 concurrency     = 32
 num_prompts     = 160
+max_model_len   = 10000
 ```
 
 Default values (sanity test via `--sanity`):
@@ -163,6 +187,8 @@ timeout_benchmark = 300
 input_len       = 8
 output_len      = 8
 concurrency     = 2
+num_prompts     = 4
+max_model_len   = 2048
 num_prompts     = 4
 ```
 

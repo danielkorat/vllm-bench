@@ -47,6 +47,7 @@ FULL_BENCH_DEFAULTS: dict = dict(
     output_len=1024,
     concurrency=32,
     num_prompts=160,
+    max_model_len=10000,
 )
 
 SANITY_DEFAULTS: dict = dict(
@@ -61,6 +62,7 @@ SANITY_DEFAULTS: dict = dict(
     output_len=8,
     concurrency=2,
     num_prompts=4,
+    max_model_len=2048,
 )
 
 
@@ -87,6 +89,8 @@ class VLLMExperimentRunner:
         output_len: int = 1024,
         concurrency: int = 32,
         num_prompts: int = 160,
+        max_model_len: int = 10000,
+        resume: bool = False,
     ):
         self.port = port
         self.timeout_startup = timeout_startup
@@ -95,11 +99,23 @@ class VLLMExperimentRunner:
         self.output_len = output_len
         self.concurrency = concurrency
         self.num_prompts = num_prompts
+        self.max_model_len = max_model_len
+        self.resume = resume
 
-        # Create timestamped subdirectory in Israel Time
+        # Create or reuse timestamped subdirectory in Israel Time
         israel_tz = ZoneInfo("Asia/Jerusalem")
         timestamp = datetime.now(israel_tz).strftime("%Y%m%d_%H%M")
-        self.results_dir = Path(results_dir) / timestamp
+        base = Path(results_dir)
+        if resume:
+            existing = sorted(base.glob("2*"), reverse=True) if base.exists() else []
+            if existing:
+                self.results_dir = existing[0]
+                Logger.log(f"Resuming from existing run: {self.results_dir}")
+            else:
+                self.results_dir = base / timestamp
+                Logger.log(f"No previous run found; creating: {self.results_dir}")
+        else:
+            self.results_dir = base / timestamp
         self.log_dir = self.results_dir / "logs"
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(exist_ok=True)
@@ -271,7 +287,7 @@ class VLLMExperimentRunner:
             "--disable-sliding-window",
             "--disable-log-requests",
             "--max-num-batched-tokens=8192",
-            "--max-model-len 2048", # TODO: make this configurable?
+            f"--max-model-len {self.max_model_len}",
             f"-tp={config.tp}"
         ]
         
@@ -464,6 +480,11 @@ class VLLMExperimentRunner:
         start_time = time.time()
 
         for i, config in enumerate(configs, 1):
+            result_file = self.results_dir / f"{config.name}_results.json"
+            if self.resume and result_file.exists():
+                Logger.log(f"[{i}/{len(configs)}] Skipping {config.name} (result already exists)")
+                self.results.append(ExperimentResult(config=config, success=True, duration=0))
+                continue
             Logger.log(f"\nExperiment {i}/{len(configs)}")
             self.results.append(self.run_experiment(config))
 
@@ -562,7 +583,12 @@ def main():
     parser.add_argument('--output-len', type=int, help='Random output token length')
     parser.add_argument('--concurrency', type=int, help='Max concurrent requests')
     parser.add_argument('--num-prompts', type=int, help='Total number of prompts')
+    parser.add_argument('--max-model-len', type=int, help='Maximum model context length')
     parser.add_argument('--port', type=int, default=8000, help='vLLM server port')
+    parser.add_argument(
+        '--resume', action='store_true',
+        help='Resume from the most recent partial run, skipping already-completed experiments',
+    )
 
     args = parser.parse_args()
 
@@ -585,6 +611,8 @@ def main():
         output_len=get('output_len', 'output_len'),
         concurrency=get('concurrency', 'concurrency'),
         num_prompts=get('num_prompts', 'num_prompts'),
+        max_model_len=get('max_model_len', 'max_model_len'),
+        resume=args.resume,
     )
 
     success = runner.run_all(

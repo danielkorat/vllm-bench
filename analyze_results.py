@@ -43,204 +43,181 @@ def parse_config_from_filename(filename: str) -> Dict[str, str]:
     return config
 
 
+def _best_config_block(label: str, results: List[Dict], metric_key: str, higher_is_better: bool) -> List[str]:
+    """Return formatted lines for the best result on a given metric."""
+    candidates = [(r, r['data'].get(metric_key)) for r in results if r['data'].get(metric_key) is not None]
+    if not candidates:
+        return []
+    best_r, best_val = (max if higher_is_better else min)(candidates, key=lambda x: float(x[1]))
+    unit = "req/s" if "throughput" in metric_key else ("tok/s" if "output" in metric_key else "ms")
+    direction = "Highest" if higher_is_better else "Lowest"
+    c = best_r['config']
+    return [
+        f"{direction} {label}: {float(best_val):.2f} {unit}",
+        f"  Model: {c['model']}  TP: {c['tp']}  Quant: {c['quant']}  Eager: {c['eager']}",
+        f"  File:  {best_r['filename']}",
+    ]
+
+
+def _stats_block(label: str, values: List[float], unit: str) -> List[str]:
+    if not values:
+        return []
+    sv = sorted(values)
+    median = sv[len(sv) // 2]
+    return [
+        f"{label} ({unit}):",
+        f"  Min:    {min(values):.2f}",
+        f"  Max:    {max(values):.2f}",
+        f"  Mean:   {sum(values)/len(values):.2f}",
+        f"  Median: {median:.2f}",
+    ]
+
+
 def analyze_results(results_dir: str = './experiment_results') -> None:
-    """Analyze all result files and generate comprehensive report"""
-    
+    """Analyze all result files, print to stdout, and save to detailed_analysis.txt."""
+
     results_path = Path(results_dir)
     if not results_path.exists():
         print(f"Error: Results directory '{results_dir}' not found", file=sys.stderr)
         sys.exit(1)
-    
-    # Find all result JSON files
+
     result_files = list(results_path.glob('*_results.json'))
-    
     if not result_files:
         print(f"No result files found in {results_dir}", file=sys.stderr)
         sys.exit(1)
-    
+
     print(f"Found {len(result_files)} result files\n")
-    
+
     # Collect all results
     results = []
     for file_path in sorted(result_files):
         data = load_result(file_path)
         if data:
             config = parse_config_from_filename(file_path.name)
-            results.append({
-                'config': config,
-                'data': data,
-                'filename': file_path.name
-            })
-    
-    # Generate analysis report
-    print("=" * 80)
-    print("vLLM Benchmark Results Analysis")
-    print("=" * 80)
-    print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Total successful experiments: {len(results)}\n")
-    
+            results.append({'config': config, 'data': data, 'filename': file_path.name})
+
+    # ------------------------------------------------------------------ #
+    # Build the full report as a list of lines so we can both print it    #
+    # and save it to a file without duplication.                           #
+    # ------------------------------------------------------------------ #
+    SEP = "=" * 80
+    sep = "-" * 80
+    lines: List[str] = []
+
+    def section(title: str):
+        lines.extend(["", SEP, title, SEP])
+
+    # Header
+    lines += [
+        SEP,
+        "vLLM Benchmark Results Analysis",
+        SEP,
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Total successful experiments: {len(results)}",
+    ]
+
     # Overall statistics
-    print("\n" + "=" * 80)
-    print("OVERALL STATISTICS")
-    print("=" * 80)
-    
-    all_throughputs = []
-    all_output_throughputs = []
-    all_ttfts = []
-    all_tpots = []
-    
-    for result in results:
-        data = result['data']
-        
-        req_throughput = data.get('request_throughput')
-        out_throughput = data.get('output_throughput')
-        ttft = data.get('mean_ttft_ms')
-        tpot = data.get('mean_tpot_ms')
-        
-        if req_throughput is not None:
-            all_throughputs.append(float(req_throughput))
-        if out_throughput is not None:
-            all_output_throughputs.append(float(out_throughput))
-        if ttft is not None:
-            all_ttfts.append(float(ttft))
-        if tpot is not None:
-            all_tpots.append(float(tpot))
-    
-    if all_throughputs:
-        print(f"Request throughput (req/s):")
-        print(f"  Min:    {min(all_throughputs):.2f}")
-        print(f"  Max:    {max(all_throughputs):.2f}")
-        print(f"  Mean:   {sum(all_throughputs)/len(all_throughputs):.2f}")
-        print(f"  Median: {sorted(all_throughputs)[len(all_throughputs)//2]:.2f}")
-    
-    if all_output_throughputs:
-        print(f"\nOutput throughput (tok/s):")
-        print(f"  Min:    {min(all_output_throughputs):.2f}")
-        print(f"  Max:    {max(all_output_throughputs):.2f}")
-        print(f"  Mean:   {sum(all_output_throughputs)/len(all_output_throughputs):.2f}")
-        print(f"  Median: {sorted(all_output_throughputs)[len(all_output_throughputs)//2]:.2f}")
-    
-    if all_ttfts:
-        print(f"\nMean TTFT (ms):")
-        print(f"  Min:    {min(all_ttfts):.2f}")
-        print(f"  Max:    {max(all_ttfts):.2f}")
-        print(f"  Mean:   {sum(all_ttfts)/len(all_ttfts):.2f}")
-        print(f"  Median: {sorted(all_ttfts)[len(all_ttfts)//2]:.2f}")
-    
-    if all_tpots:
-        print(f"\nMean TPOT (ms):")
-        print(f"  Min:    {min(all_tpots):.2f}")
-        print(f"  Max:    {max(all_tpots):.2f}")
-        print(f"  Mean:   {sum(all_tpots)/len(all_tpots):.2f}")
-        print(f"  Median: {sorted(all_tpots)[len(all_tpots)//2]:.2f}")
-    
-    # Group by model
-    print("\n" + "=" * 80)
-    print("RESULTS BY MODEL")
-    print("=" * 80)
-    
-    models = {}
-    for result in results:
-        model = result['config']['model']
-        if model not in models:
-            models[model] = []
-        models[model].append(result)
-    
+    all_throughputs:        List[float] = []
+    all_output_throughputs: List[float] = []
+    all_ttfts:              List[float] = []
+    all_tpots:              List[float] = []
+
+    for r in results:
+        d = r['data']
+        if d.get('request_throughput') is not None:
+            all_throughputs.append(float(d['request_throughput']))
+        if d.get('output_throughput') is not None:
+            all_output_throughputs.append(float(d['output_throughput']))
+        if d.get('mean_ttft_ms') is not None:
+            all_ttfts.append(float(d['mean_ttft_ms']))
+        if d.get('mean_tpot_ms') is not None:
+            all_tpots.append(float(d['mean_tpot_ms']))
+
+    section("OVERALL STATISTICS")
+    lines += _stats_block("Request throughput", all_throughputs, "req/s")
+    lines += ([""] if all_throughputs and all_output_throughputs else [])
+    lines += _stats_block("Output throughput",  all_output_throughputs, "tok/s")
+    lines += ([""] if all_output_throughputs and all_ttfts else [])
+    lines += _stats_block("Mean TTFT",           all_ttfts, "ms")
+    lines += ([""] if all_ttfts and all_tpots else [])
+    lines += _stats_block("Mean TPOT",           all_tpots, "ms")
+
+    # Results by model
+    section("RESULTS BY MODEL")
+
+    models: Dict[str, List] = {}
+    for r in results:
+        models.setdefault(r['config']['model'], []).append(r)
+
+    HDR = f"{'TP':<4} {'Quant':<6} {'Eager':<6} {'Req/s':<10} {'Out tok/s':<12} {'TTFT (ms)':<12} {'TPOT (ms)':<12} {'Status':<10}"
+
     for model, model_results in sorted(models.items()):
-        print(f"\n{model} ({len(model_results)} configurations)")
-        print("-" * 80)
-        
-        # Create a table
-        print(f"{'TP':<4} {'Quant':<6} {'Eager':<6} {'Req/s':<10} {'Out tok/s':<12} {'TTFT (ms)':<12} {'TPOT (ms)':<12} {'Status':<10}")
-        print("-" * 80)
-        
-        for result in sorted(model_results, key=lambda x: (x['config']['tp'], x['config']['quant'], x['config']['eager'])):
-            config = result['config']
-            data = result['data']
-            
-            req_tput = data.get('request_throughput')
-            out_tput = data.get('output_throughput')
-            ttft = data.get('mean_ttft_ms')
-            tpot = data.get('mean_tpot_ms')
-            
-            req_tput_str = f"{req_tput:.2f}" if req_tput is not None else 'N/A'
-            out_tput_str = f"{out_tput:.2f}" if out_tput is not None else 'N/A'
-            ttft_str = f"{ttft:.2f}" if ttft is not None else 'N/A'
-            tpot_str = f"{tpot:.2f}" if tpot is not None else 'N/A'
-            status = "✓ Success"
-            
-            print(f"{config['tp']:<4} {config['quant']:<6} {config['eager']:<6} {req_tput_str:<10} {out_tput_str:<12} {ttft_str:<12} {tpot_str:<12} {status:<10}")
-    
-    # Best configurations
-    print("\n" + "=" * 80)
-    print("BEST CONFIGURATIONS")
-    print("=" * 80)
-    
-    if all_throughputs:
-        # Find best throughput
-        best_throughput_idx = all_throughputs.index(max(all_throughputs))
-        best_result = results[best_throughput_idx]
-        print(f"\nHighest Throughput: {max(all_throughputs):.2f} tokens/s")
-        print(f"  Configuration: {best_result['filename']}")
-        print(f"  Model: {best_result['config']['model']}")
-        print(f"  TP: {best_result['config']['tp']}")
-        print(f"  Quantization: {best_result['config']['quant']}")
-        print(f"  Enforce Eager: {best_result['config']['eager']}")
-    
-    if all_ttfts:
-        # Find best TTFT (lowest)
-        best_ttft_idx = all_ttfts.index(min(all_ttfts))
-        best_result = results[best_ttft_idx]
-        print(f"\nLowest TTFT: {min(all_ttfts):.2f} ms")
-        print(f"  Configuration: {best_result['filename']}")
-        print(f"  Model: {best_result['config']['model']}")
-        print(f"  TP: {best_result['config']['tp']}")
-        print(f"  Quantization: {best_result['config']['quant']}")
-        print(f"  Enforce Eager: {best_result['config']['eager']}")
-    
-    if all_tpots:
-        # Find best TPOT (lowest)
-        best_tpot_idx = all_tpots.index(min(all_tpots))
-        best_result = results[best_tpot_idx]
-        print(f"\nLowest TPOT: {min(all_tpots):.2f} ms")
-        print(f"  Configuration: {best_result['filename']}")
-        print(f"  Model: {best_result['config']['model']}")
-        print(f"  TP: {best_result['config']['tp']}")
-        print(f"  Quantization: {best_result['config']['quant']}")
-        print(f"  Enforce Eager: {best_result['config']['eager']}")
-    
-    # Save detailed report
+        lines += ["", f"{model} ({len(model_results)} configurations)", sep, HDR, sep]
+        for r in sorted(model_results, key=lambda x: (x['config']['tp'], x['config']['quant'], x['config']['eager'])):
+            c, d = r['config'], r['data']
+            req  = d.get('request_throughput')
+            out  = d.get('output_throughput')
+            ttft = d.get('mean_ttft_ms')
+            tpot = d.get('mean_tpot_ms')
+            lines.append(
+                f"{c['tp']:<4} {c['quant']:<6} {c['eager']:<6} "
+                f"{(f'{req:.2f}' if req is not None else 'N/A'):<10} "
+                f"{(f'{out:.2f}' if out is not None else 'N/A'):<12} "
+                f"{(f'{ttft:.2f}' if ttft is not None else 'N/A'):<12} "
+                f"{(f'{tpot:.2f}' if tpot is not None else 'N/A'):<12} "
+                f"{'✓ Success':<10}"
+            )
+
+    # Best configurations per model
+    section("BEST CONFIGURATIONS PER MODEL")
+    for model, model_results in sorted(models.items()):
+        lines += ["", f"── {model} ──"]
+        lines += _best_config_block("Request Throughput", model_results, 'request_throughput', higher_is_better=True)
+        lines.append("")
+        lines += _best_config_block("TTFT",               model_results, 'mean_ttft_ms',        higher_is_better=False)
+        lines.append("")
+        lines += _best_config_block("TPOT",               model_results, 'mean_tpot_ms',         higher_is_better=False)
+
+    # Best configurations overall
+    section("BEST CONFIGURATIONS OVERALL")
+    lines.append("")
+    lines += _best_config_block("Request Throughput", results, 'request_throughput', higher_is_better=True)
+    lines.append("")
+    lines += _best_config_block("Output Throughput",  results, 'output_throughput',  higher_is_better=True)
+    lines.append("")
+    lines += _best_config_block("TTFT",               results, 'mean_ttft_ms',        higher_is_better=False)
+    lines.append("")
+    lines += _best_config_block("TPOT",               results, 'mean_tpot_ms',         higher_is_better=False)
+    lines.append("")
+
+    # Print to stdout
+    report_text = "\n".join(lines)
+    print(report_text)
+
+    # Save human-readable report
     report_file = results_path / 'detailed_analysis.txt'
-    with open(report_file, 'w') as f:
-        f.write(f"Detailed Analysis Report\n")
-        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        
-        for result in results:
-            f.write("=" * 80 + "\n")
-            f.write(f"Configuration: {result['filename']}\n")
-            f.write("-" * 80 + "\n")
-            f.write(json.dumps(result['data'], indent=2))
-            f.write("\n\n")
-    
-    print(f"\n\nDetailed report saved to: {report_file}")
-    
-    # Generate CSV for easy import to spreadsheets
+    report_file.write_text(report_text + "\n")
+    print(f"\nAnalysis saved to: {report_file}")
+
+    # Save raw JSON dump
+    raw_file = results_path / 'raw_results.json'
+    with open(raw_file, 'w') as f:
+        json.dump([{'filename': r['filename'], 'config': r['config'], 'data': r['data']} for r in results], f, indent=2)
+    print(f"Raw JSON dump saved to: {raw_file}")
+
+    # Generate CSV
     csv_file = results_path / 'results_summary.csv'
     with open(csv_file, 'w') as f:
         f.write("Model,TP,Quantization,EnforceEager,ReqThroughput_req_s,OutThroughput_tok_s,TTFT_ms,TPOT_ms,Filename\n")
-        for result in results:
-            config = result['config']
-            data = result['data']
-            
-            req_tput = data.get('request_throughput', '')
-            out_tput = data.get('output_throughput', '')
-            ttft = data.get('mean_ttft_ms', '')
-            tpot = data.get('mean_tpot_ms', '')
-            
-            f.write(f"{config['model']},{config['tp']},{config['quant']},{config['eager']},{req_tput},{out_tput},{ttft},{tpot},{result['filename']}\n")
-    
-    print(f"CSV summary saved to: {csv_file}")
-    print("\n" + "=" * 80)
+        for r in results:
+            c, d = r['config'], r['data']
+            f.write(
+                f"{c['model']},{c['tp']},{c['quant']},{c['eager']},"
+                f"{d.get('request_throughput','')},{d.get('output_throughput','')},"
+                f"{d.get('mean_ttft_ms','')},{d.get('mean_tpot_ms','')},{r['filename']}\n"
+            )
+    print(f"CSV summary saved to:  {csv_file}")
+    print("\n" + SEP)
 
 
 if __name__ == '__main__':

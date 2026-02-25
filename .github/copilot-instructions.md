@@ -17,6 +17,8 @@ Automated benchmarking system for Intel XPU vLLM inference across multiple model
 /root/vllm-bench/
 ├── run_experiments.py          # Main automation engine – runs ALL experiments
 │                               #   --sanity flag activates sanity-test mode
+│                               #   --resume skips already-completed experiments
+├── run_background.sh           # Detached background launcher (auto-resume, PID file)
 ├── experiment_common.py        # Shared dataclasses (ExperimentConfig, ExperimentResult, Logger)
 ├── experiment_utils.py         # Utility commands (status, stop, clean, backup, check, logs)
 ├── analyze_results.py          # Results analysis and visualization
@@ -287,11 +289,26 @@ self.results_dir.mkdir(parents=True, exist_ok=True)
 - Server startup: 300 seconds (5 minutes)
 - Benchmark: 1800 seconds (30 minutes)
 
+### Max Model Length
+```python
+FULL_BENCH_DEFAULTS: max_model_len = 10000
+SANITY_DEFAULTS:     max_model_len = 2048
+```
+Exposed as `--max-model-len` CLI argument.
+
 ## Common Commands
 
 ### Run Sanity Test (Quick Validation)
 ```bash
 ./run_experiments.py --sanity
+```
+
+### Run in Background (auto-resume)
+```bash
+./run_background.sh
+# Resumes the latest partial run; use --no-resume for a fresh start
+tail -f bg_run_*.log              # follow live output
+kill $(cat experiment_bg.pid)     # stop
 ```
 
 ### Run All Experiments

@@ -28,6 +28,17 @@ Tests all combinations: 3 models × 3 TP values × 2 quant modes × 2 eager mode
 (fp8+eager=false is skipped automatically).
 Results saved to `./experiment_results/<timestamp>/`.
 
+### Background run (with auto-resume)
+```bash
+./run_background.sh
+```
+Detaches from the terminal. Automatically skips already-completed experiments on
+restart (`--resume` is passed by default). Use `--no-resume` to force a fresh run.
+```bash
+tail -f bg_run_*.log              # follow live output
+kill $(cat experiment_bg.pid)     # stop the run
+```
+
 ### Subset / custom parameters
 ```bash
 # Single model
@@ -38,6 +49,12 @@ Results saved to `./experiment_results/<timestamp>/`.
 
 # Override benchmark params
 ./run_experiments.py --input-len 512 --output-len 512 --concurrency 16 --num-prompts 80
+
+# Override max model context length
+./run_experiments.py --max-model-len 4096
+
+# Resume a partial run
+./run_experiments.py --resume
 
 # Override sanity defaults
 ./run_experiments.py --sanity --tp 4 --input-len 16 --num-prompts 8
@@ -98,7 +115,8 @@ cat experiment_results/<timestamp>/results_summary.csv
 
 | File | Purpose |
 |---|---|
-| `run_experiments.py` | Main runner — full suite + `--sanity` mode |
+| `run_experiments.py` | Main runner — full suite + `--sanity` + `--resume` mode |
+| `run_background.sh` | Background launcher with auto-resume and PID tracking |
 | `experiment_utils.py` | Utility commands (status, stop, backup, …) |
 | `analyze_results.py` | Post-run analysis and CSV/text reports |
 | `experiment_common.py` | Shared dataclasses and logging |
@@ -115,6 +133,7 @@ cat experiment_results/<timestamp>/results_summary.csv
 | Quantization | none, fp8 | none, fp8 |
 | Enforce Eager | true, false | true, false |
 | Input / Output len | 1024 / 1024 | 8 / 8 |
+| Max model len | 10000 | 2048 |
 | Concurrency | 32 | 2 |
 | Num prompts | 160 | 4 |
 | Startup timeout | 300 s | 180 s |
