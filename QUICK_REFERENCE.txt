@@ -1,0 +1,179 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                  vLLM EXPERIMENT AUTOMATION - QUICK REFERENCE                ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ PREREQUISITES                                                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Check everything is ready:
+    ./experiment_utils.sh check
+
+Ensure container is running:
+    docker ps | grep vllm-test
+    # If not running: docker start vllm-test
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ RUNNING EXPERIMENTS                                                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Run all 36 experiments:
+    ./run_experiments.py
+
+This tests all combinations of:
+    • 3 models (openai/gpt-oss-20b, Qwen/Qwen3-30B-A3B, Qwen/Qwen3-4B-Thinking-2507)
+    • 3 tensor parallelism values (2, 4, 8)
+    • 2 quantization modes (fp8, off)
+    • 2 eager modes (true, false)
+
+Expected duration: Several hours
+Results saved to: ./experiment_results/
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ MONITORING                                                                   │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Check current status:
+    ./experiment_utils.py status
+
+Watch live logs:
+    ./experiment_utils.py logs
+
+Monitor GPU usage (separate terminal):
+    watch -n 1 'xpu-smi stats -d 3'
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ANALYZING RESULTS                                                            │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Generate analysis report:
+    ./analyze_results.py
+
+View summary:
+    cat experiment_results/summary.txt
+
+Open detailed analysis:
+    cat experiment_results/detailed_analysis.txt
+
+Import to spreadsheet:
+    experiment_results/results_summary.csv
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ UTILITIES                                                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Stop running experiments:
+    ./experiment_utils.py stop
+
+Backup results before new run:
+    ./experiment_utils.py backup
+
+Clean up all results:
+    ./experiment_utils.py clean
+
+Show all utilities:
+    ./experiment_utils.py --help
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ TROUBLESHOOTING                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Experiment stuck or hanging:
+    ./experiment_utils.py stop
+    ./run_experiments.py  # Resume
+
+Container not running:
+    docker start vllm-test
+
+Check recent errors:
+    tail -50 experiment_results/logs/*_server.log
+
+Out of disk space:
+    ./experiment_utils.py backup  # Backup first
+    ./experiment_utils.py clean   # Then clean
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ FILES CREATED                                                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Main Scripts:
+    run_experiments.py          → Automation engine (runs all experiments)
+    analyze_results.py          → Results analysis and reporting
+    experiment_utils.py         → Utility commands (status, stop, backup, etc.)
+
+Documentation:
+    EXPERIMENT_AUTOMATION.md    → Full documentation
+    QUICK_REFERENCE.txt         → This file
+
+Output (after running):
+    experiment_results/
+    ├── summary.txt                → Overall summary
+    ├── detailed_analysis.txt      → Detailed report
+    ├── results_summary.csv        → CSV export
+    ├── *_results.json             → Individual results (36 files)
+    └── logs/                      → Server and benchmark logs
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ TYPICAL WORKFLOW                                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+1. Check prerequisites:
+       ./experiment_utils.py check
+
+2. (Optional) Backup previous results:
+       ./experiment_utils.py backup
+
+3. Start experiments:
+       ./run_experiments.py
+
+4. Monitor in another terminal (optional):
+       watch -n 1 './experiment_utils.py status'
+
+5. After completion, analyze:
+       ./analyze_results.py
+
+6. Review results:
+       cat experiment_results/summary.txt
+       cat experiment_results/results_summary.csv
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ KEY FEATURES                                                                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+✓ Fully automated - No manual intervention needed
+✓ Error handling - Gracefully skips failed configs and continues
+✓ Progress tracking - Color-coded console output with timestamps
+✓ Health checks - Verifies server ready before benchmarking
+✓ Organized output - Results and logs with descriptive names
+✓ Summary reports - Success/failure counts and best configurations
+✓ CSV export - Easy import to Excel/Google Sheets
+✓ Resumable - Can stop and restart (with manual config selection)
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ CUSTOMIZATION                                                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+To test fewer configurations, use command-line options:
+    ./run_experiments.py --models openai/gpt-oss-20b \
+                         --tp 4 \
+                         --quantization none fp8
+
+Or edit the defaults in run_experiments.py
+
+Example - Test only one model with 2 configs:
+    ./run_experiments.py --models openai/gpt-oss-20b \
+                         --tp 4 \
+                         --quantization none
+    # This runs only 2 experiments (eager true/false) instead of 36
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ NEED HELP?                                                                   │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Full documentation:
+    cat EXPERIMENT_AUTOMATION.md
+
+Check logs for errors:
+    ls -lh experiment_results/logs/
+
+═══════════════════════════════════════════════════════════════════════════════

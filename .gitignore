@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Experiment outputs (runtime data)
+experiment_results/
+sanity_test_results/
+
+# Node
+node_modules/
+dist/
+build/
+
+# Misc
+.DS_Store
+*.log
