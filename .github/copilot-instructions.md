@@ -17,7 +17,6 @@ Automated benchmarking system for Intel XPU vLLM inference across multiple model
 /root/vllm-bench/
 ├── run_experiments.py          # Main automation engine – runs ALL experiments
 │                               #   --sanity flag activates sanity-test mode
-├── run_sanity_test.py          # Thin wrapper: injects --sanity and calls run_experiments.py
 ├── experiment_common.py        # Shared dataclasses (ExperimentConfig, ExperimentResult, Logger)
 ├── experiment_utils.py         # Utility commands (status, stop, clean, backup, check, logs)
 ├── analyze_results.py          # Results analysis and visualization
@@ -66,11 +65,11 @@ if config.quantization:
 - Use dataclasses for configuration objects
 
 ### 3. Execution Environment
-**RULE**: Both `run_experiments.py` and `run_sanity_test.py` run **inside** the container.
+**RULE**: `run_experiments.py` runs **inside** the container.
 - Scripts are executed by calling them directly within the container shell.
 - `check_environment()` checks `which vllm` (not docker container status).
 - Never add `docker exec` wrappers back; they break oneAPI loading.
-- To launch: `docker exec -it vllm-test bash`, then `./run_experiments.py` or `./run_sanity_test.py`.
+- To launch: `docker exec -it vllm-test bash`, then `./run_experiments.py` (or `./run_experiments.py --sanity` for a quick check).
 
 ### 4. Error Handling Strategy
 **RULE**: Graceful degradation - skip failed experiments, continue with rest
@@ -292,8 +291,7 @@ self.results_dir.mkdir(parents=True, exist_ok=True)
 
 ### Run Sanity Test (Quick Validation)
 ```bash
-./run_sanity_test.py          # thin wrapper → run_experiments.py --sanity
-./run_experiments.py --sanity # equivalent; both run inside the container
+./run_experiments.py --sanity
 ```
 
 ### Run All Experiments
@@ -312,7 +310,7 @@ self.results_dir.mkdir(parents=True, exist_ok=True)
                      --quantization none fp8
 
 # Override sanity defaults
-./run_sanity_test.py --tp 4 --input-len 16 --num-prompts 8
+./run_experiments.py --sanity --tp 4 --input-len 16 --num-prompts 8
 ```
 
 ### Utilities
@@ -408,10 +406,6 @@ This repository follows the user's global instructions:
 - Benchmark parameters (`input_len`, `output_len`, `concurrency`, `num_prompts`) are constructor args.
 - Two default sets: `FULL_BENCH_DEFAULTS` and `SANITY_DEFAULTS`.
 - `--sanity` CLI flag selects `SANITY_DEFAULTS`; any param can still be overridden.
-
-### run_sanity_test.py
-- 23-line thin wrapper only. Do NOT add logic here.
-- Injects `--sanity` into `sys.argv`, then calls `run_experiments.main()`.
 
 ---
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Shared data classes and utilities for vLLM experiment scripts.
-Used by both run_sanity_test.py and run_experiments.py.
+Used by run_experiments.py and other scripts.
 """
 
 from datetime import datetime

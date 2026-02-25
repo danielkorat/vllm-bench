@@ -271,7 +271,7 @@ class VLLMExperimentRunner:
             "--disable-sliding-window",
             "--disable-log-requests",
             "--max-num-batched-tokens=8192",
-            "--max-model-len 16384",
+            "--max-model-len 2048", # TODO: make this configurable?
             f"-tp={config.tp}"
         ]
         

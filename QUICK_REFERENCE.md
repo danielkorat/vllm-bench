@@ -16,8 +16,7 @@ cd /root/vllm-bench
 
 ### Sanity test (recommended before a full run)
 ```bash
-./run_sanity_test.py
-# equivalent: ./run_experiments.py --sanity
+./run_experiments.py --sanity
 ```
 Runs 1 model, tp=2, 8-token I/O, 4 prompts. Takes ~5 minutes.
 
@@ -41,7 +40,7 @@ Results saved to `./experiment_results/<timestamp>/`.
 ./run_experiments.py --input-len 512 --output-len 512 --concurrency 16 --num-prompts 80
 
 # Override sanity defaults
-./run_sanity_test.py --tp 4 --input-len 16 --num-prompts 8
+./run_experiments.py --sanity --tp 4 --input-len 16 --num-prompts 8
 
 # All options
 ./run_experiments.py --help
@@ -100,7 +99,6 @@ cat experiment_results/<timestamp>/results_summary.csv
 | File | Purpose |
 |---|---|
 | `run_experiments.py` | Main runner — full suite + `--sanity` mode |
-| `run_sanity_test.py` | Thin wrapper: injects `--sanity`, calls `run_experiments.py` |
 | `experiment_utils.py` | Utility commands (status, stop, backup, …) |
 | `analyze_results.py` | Post-run analysis and CSV/text reports |
 | `experiment_common.py` | Shared dataclasses and logging |

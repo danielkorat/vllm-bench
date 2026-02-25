@@ -49,7 +49,7 @@ All scripts run **inside** the Docker container – no `docker exec` wrappers ar
 ### Sanity Test (Recommended First)
 
 ```bash
-./run_sanity_test.py
+./run_experiments.py --sanity
 ```
 
 Runs a minimal check (1 model, tp=2, 8-token I/O, 4 prompts) to verify the full
@@ -112,10 +112,10 @@ Customize experiments using command-line options:
 
 ```bash
 # Sanity test with default settings
-./run_sanity_test.py
+./run_experiments.py --sanity
 
 # Sanity test overriding specific params
-./run_sanity_test.py --tp 4 --input-len 16 --num-prompts 8
+./run_experiments.py --sanity --tp 4 --input-len 16 --num-prompts 8
 
 # Full run with specific models
 ./run_experiments.py --models openai/gpt-oss-20b Qwen/Qwen3-30B-A3B
@@ -151,7 +151,7 @@ concurrency     = 32
 num_prompts     = 160
 ```
 
-Default values (sanity test via `--sanity` / `run_sanity_test.py`):
+Default values (sanity test via `--sanity`):
 
 ```python
 models          = ['Qwen/Qwen3-4B-Thinking-2507']
