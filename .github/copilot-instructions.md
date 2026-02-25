@@ -14,27 +14,25 @@ Automated benchmarking system for Intel XPU vLLM inference across multiple model
 ## Repository Structure
 
 ```
-/root/dkorat/deep-research/
-├── run_experiments.py          # Main automation engine (Python)
-├── run_sanity_test.py          # Minimal sanity test (4 tests, 8 token I/O, ~5 min)
+/root/vllm-bench/
+├── run_experiments.py          # Main automation engine – runs ALL experiments
+│                               #   --sanity flag activates sanity-test mode
+├── run_sanity_test.py          # Thin wrapper: injects --sanity and calls run_experiments.py
+├── experiment_common.py        # Shared dataclasses (ExperimentConfig, ExperimentResult, Logger)
 ├── experiment_utils.py         # Utility commands (status, stop, clean, backup, check, logs)
 ├── analyze_results.py          # Results analysis and visualization
 ├── EXPERIMENT_AUTOMATION.md    # Comprehensive documentation
-├── QUICK_REFERENCE.txt         # Quick command reference
-├── old/                        # Deprecated bash scripts (keep for reference)
-│   ├── official.sh             # Original manual benchmark commands
-│   ├── client.sh               # Original client script
-│   ├── serve.sh                # Original server script
-│   └── run_experiments.sh      # Old bash automation (deprecated)
+├── QUICK_REFERENCE.md          # Quick command reference (Markdown)
+├── reference.sh                # Original manual benchmark reference commands
 ├── ai-code-slop/               # Web UI components (separate project)
 ├── experiment_results/         # Created at runtime (full experiments)
-│   ├── *_results.json          # Individual experiment results
-│   ├── summary.txt             # Run summary
-│   ├── detailed_analysis.txt   # Full analysis
-│   ├── results_summary.csv     # Spreadsheet export
-│   └── logs/                   # Server and benchmark logs
-└── sanity_test_results/        # Created at runtime (sanity tests)
-    └── [same structure as experiment_results]
+│   └── YYYYMMDD_HHMM/          # Timestamped run directory
+│       ├── *_results.json      # Individual experiment results
+│       ├── summary.txt         # Run summary
+│       ├── detailed_analysis.txt
+│       ├── results_summary.csv
+│       └── logs/
+└── sanity_test_results/        # Created at runtime (sanity tests, same structure)
 ```
 
 ## Technology Stack
@@ -67,11 +65,12 @@ if config.quantization:
 - Use argparse for CLI interfaces
 - Use dataclasses for configuration objects
 
-### 3. Container Management
-**RULE**: Always verify container is running before experiments
-- Container name: `vllm-test`
-- Check with: `docker ps | grep vllm-test`
-- The container must be created using the commands in `old/official.sh`
+### 3. Execution Environment
+**RULE**: Both `run_experiments.py` and `run_sanity_test.py` run **inside** the container.
+- Scripts are executed by calling them directly within the container shell.
+- `check_environment()` checks `which vllm` (not docker container status).
+- Never add `docker exec` wrappers back; they break oneAPI loading.
+- To launch: `docker exec -it vllm-test bash`, then `./run_experiments.py` or `./run_sanity_test.py`.
 
 ### 4. Error Handling Strategy
 **RULE**: Graceful degradation - skip failed experiments, continue with rest
@@ -114,50 +113,43 @@ for quant in quantization_options:
 ```
 
 ### 9. Proxy Bypass for Benchmarks
-**RULE**: Use `no_proxy=localhost,127.0.0.1,0.0.0.0` matching the container's original config
-- Intel proxy intercepts connections; must explicitly bypass local addresses
-- Use the exact same no_proxy values as the container was created with
-- Clear HTTP_PROXY/HTTPS_PROXY vars, keep no_proxy matching official.sh
+**RULE**: Set `no_proxy` env vars inside the benchmark and server shell scripts
+- Intel proxy intercepts connections; must explicitly bypass local addresses.
+- Export proxy bypass vars directly in the `/tmp/*.sh` scripts (not via docker exec `-e` flags).
 
 ```python
 # Correct implementation
-result = subprocess.run(
-    ["docker", "exec", "-i",
-     "-e", "NO_PROXY=localhost,127.0.0.1,0.0.0.0",
-     "-e", "no_proxy=localhost,127.0.0.1,0.0.0.0",
-     "-e", "HTTP_PROXY=",
-     "-e", "HTTPS_PROXY=",
-     "-e", "http_proxy=",
-     "-e", "https_proxy=",
-     container_name, "bash", "-i", "-c", benchmark_cmd],
-    ...
-)
+with open('/tmp/run_benchmark.sh', 'w') as f:
+    f.write("\n".join([
+        "#!/bin/bash",
+        "source /opt/intel/oneapi/setvars.sh --force",
+        "export no_proxy=localhost,127.0.0.1,0.0.0.0",
+        "export NO_PROXY=localhost,127.0.0.1,0.0.0.0",
+        benchmark_cmd,
+    ]) + "\n")
 ```
 
 ### 10. oneAPI Environment Initialization
-**RULE**: Pipe commands via stdin to `docker exec -i bash` AND explicitly source `/etc/bash.bashrc`
-- `docker exec -it vllm-test bash` loads oneAPI via `/etc/bash.bashrc` because bash is interactive
-- `bash -c "cmd"` skips this → vLLM XPU kernels unavailable → benchmark hangs/fails
-- Piping stdin without a TTY also skips `.bashrc` auto-sourcing
-- ✅ CORRECT: `docker exec -i container bash` + `input="source /etc/bash.bashrc\ncmd\n"`
-- ❌ WRONG: `bash -c "command"` or `bash -i -c "command"` without explicit bashrc source
+**RULE**: Both the server and benchmark scripts must be run with `bash --login` after explicitly sourcing `/opt/intel/oneapi/setvars.sh --force`.
+- Scripts now run **inside** the container, so there is no `docker exec` wrapper.
+- Write a `.sh` script to `/tmp/`, `os.chmod` it `0o755`, and launch with `bash --login /tmp/script.sh`.
+- The `source /opt/intel/oneapi/setvars.sh --force` line inside the script loads the full XPU environment.
+- ✅ CORRECT: write script locally → `bash --login /tmp/script.sh`
+- ❌ WRONG: `bash -c "command"` without sourcing setvars; or using `docker exec` from outside the container.
 
 ```python
-# Correct implementation - mirrors official.sh interactive shell workflow
-shell_input = "\n".join([
-    "source /etc/bash.bashrc",   # load oneAPI environment
-    "export no_proxy=localhost,127.0.0.1,0.0.0.0",
-    "export NO_PROXY=localhost,127.0.0.1,0.0.0.0",
-    "export HTTP_PROXY=",
-    "export http_proxy=",
-    benchmark_cmd,
-]) + "\n"
-result = subprocess.run(
-    ["docker", "exec", "-i", container_name, "bash"],
-    input=shell_input,
-    text=True,
-    timeout=timeout
-)
+# Correct implementation
+script = "/tmp/start_vllm_server.sh"
+with open(script, 'w') as f:
+    f.write("\n".join([
+        "#!/bin/bash",
+        "source /opt/intel/oneapi/setvars.sh --force",
+        "export no_proxy=localhost,127.0.0.1,0.0.0.0",
+        "export NO_PROXY=localhost,127.0.0.1,0.0.0.0",
+        vllm_cmd,
+    ]) + "\n")
+os.chmod(script, 0o755)
+subprocess.Popen(["bash", "--login", script], ...)
 ```
 
 ### 10. Health Check Implementation
@@ -168,7 +160,7 @@ result = subprocess.run(
 
 ```python
 # Correct implementation
-result = self.docker_exec(f"curl -f -s http://localhost:{self.port}/health", timeout=10)
+result = self.exec_local(f"curl -f -s http://localhost:{self.port}/health", timeout=10)
 if result.returncode == 0:  # Don't check result.stdout.strip()
     Logger.success("Server is ready!")
     return True
@@ -201,7 +193,7 @@ if failed_requests > 0 or successful_requests == 0:
 # Correct implementation
 def wait_for_server(self) -> bool:
     time.sleep(10)  # Let process initialize
-    result = self.docker_exec("pgrep -f 'vllm serve' | head -1", timeout=5)
+    result = self.exec_local("pgrep -f 'vllm serve' | head -1", timeout=5)
     if result.returncode != 0 or not result.stdout.strip():
         Logger.error("vLLM process not running!")
         self._show_server_logs()
@@ -232,14 +224,18 @@ def build_benchmark_command(self, config: ExperimentConfig) -> str:
 ```python
 # Correct implementation
 def stop_vllm_server(self):
-    try:
-        self.docker_exec("pkill -f 'vllm serve'", capture_output=False)
-    except subprocess.CalledProcessError:
-        pass
-    try:
-        self.docker_exec("pkill -f 'vllm bench'", capture_output=False)
-    except subprocess.CalledProcessError:
-        pass
+    if self._server_process is not None:
+        try:
+            self._server_process.kill()
+            self._server_process.wait(timeout=10)
+        except Exception:
+            pass
+        self._server_process = None
+    for pattern in ("'vllm serve'", "'vllm bench'"):
+        try:
+            self.exec_local(f"pkill -f {pattern}", capture_output=False)
+        except subprocess.CalledProcessError:
+            pass
     time.sleep(5)
 ```
 
@@ -296,7 +292,8 @@ self.results_dir.mkdir(parents=True, exist_ok=True)
 
 ### Run Sanity Test (Quick Validation)
 ```bash
-./run_sanity_test.py  # ~5 min, 3 tests, 8 token I/O, 4 prompts
+./run_sanity_test.py          # thin wrapper → run_experiments.py --sanity
+./run_experiments.py --sanity # equivalent; both run inside the container
 ```
 
 ### Run All Experiments
@@ -313,6 +310,9 @@ self.results_dir.mkdir(parents=True, exist_ok=True)
 ./run_experiments.py --models openai/gpt-oss-20b \
                      --tp 4 8 \
                      --quantization none fp8
+
+# Override sanity defaults
+./run_sanity_test.py --tp 4 --input-len 16 --num-prompts 8
 ```
 
 ### Utilities
@@ -398,5 +398,22 @@ This repository follows the user's global instructions:
 
 ---
 
-**Last Updated**: February 24, 2026
+## Architecture Notes
+
+### Unified Runner (run_experiments.py)
+- `VLLMExperimentRunner` is the single class for all experiments.
+- Runs **inside** the Docker container; no `docker exec` wrappers.
+- `exec_local(cmd)` replaces the old `docker_exec()` method.
+- `run_all()` replaces the old `run_all_experiments()` method.
+- Benchmark parameters (`input_len`, `output_len`, `concurrency`, `num_prompts`) are constructor args.
+- Two default sets: `FULL_BENCH_DEFAULTS` and `SANITY_DEFAULTS`.
+- `--sanity` CLI flag selects `SANITY_DEFAULTS`; any param can still be overridden.
+
+### run_sanity_test.py
+- 23-line thin wrapper only. Do NOT add logic here.
+- Injects `--sanity` into `sys.argv`, then calls `run_experiments.main()`.
+
+---
+
+**Last Updated**: February 25, 2026
 **Primary Maintainer**: Senior Software Engineer, Intel

@@ -4,11 +4,13 @@ Automated benchmarking system for running comprehensive vLLM experiments across 
 
 ## Overview
 
-This automation suite runs **36 different configurations** combining:
+This automation suite runs up to **30 different configurations** (fp8+eager=false is skipped automatically) combining:
 - **Models**: 3 models (openai/gpt-oss-20b, Qwen/Qwen3-30B-A3B, Qwen/Qwen3-4B-Thinking-2507)
 - **Tensor Parallelism**: 3 values (2, 4, 8)
-- **Quantization**: 2 options (fp8, off)
+- **Quantization**: 2 options (none, fp8)
 - **Enforce Eager**: 2 options (true, false)
+
+All scripts run **inside** the Docker container – no `docker exec` wrappers are used.
 
 ## Prerequisites
 
@@ -23,19 +25,35 @@ This automation suite runs **36 different configurations** combining:
      -e no_proxy=localhost,127.0.0.1,0.0.0.0 \
      -e NO_PROXY=localhost,127.0.0.1,0.0.0.0 \
      -e HF_TOKEN=${HF_READ_TOKEN} \
-     -v /dev/dri/by-path:/dev/dri/by-path \
      --name=vllm-test \
      --device /dev/dri:/dev/dri \
      -v ~/.cache/huggingface:/root/.cache/huggingface \
+     -v /dev/dri/by-path:/dev/dri/by-path \
+     -v /root/dkorat/vllm-bench/:/root/vllm-bench \
      --entrypoint= intel/vllm:0.14.1-xpu /bin/bash
    ```
 
-2. Verify container is running:
+2. Enter the container:
    ```bash
-   docker ps | grep vllm-test
+   docker exec -it vllm-test bash
+   cd /root/vllm-bench
+   ```
+
+3. (Optional) Verify vLLM is available:
+   ```bash
+   ./experiment_utils.py check
    ```
 
 ## Quick Start
+
+### Sanity Test (Recommended First)
+
+```bash
+./run_sanity_test.py
+```
+
+Runs a minimal check (1 model, tp=2, 8-token I/O, 4 prompts) to verify the full
+pipeline works before committing to a multi-hour full run.
 
 ### Run All Experiments
 
@@ -44,9 +62,9 @@ This automation suite runs **36 different configurations** combining:
 ```
 
 This will:
-- Run all 36 configuration combinations
+- Run up to 30 configuration combinations (fp8+eager=false skipped automatically)
 - Handle errors gracefully (skip failed configs)
-- Save results to `./experiment_results/`
+- Save results to `./experiment_results/<timestamp>/`
 - Generate a summary report
 - Create detailed logs for each run
 
@@ -75,16 +93,17 @@ This generates:
 
 ```
 experiment_results/
-├── summary.txt                                           # Overall summary
-├── detailed_analysis.txt                                 # Detailed analysis
-├── results_summary.csv                                   # CSV export
-├── openai_gpt-oss-20b_tp2_quant-off_eager-true_results.json
-├── openai_gpt-oss-20b_tp2_quant-off_eager-false_results.json
-├── ... (all result files)
-└── logs/
-    ├── openai_gpt-oss-20b_tp2_quant-off_eager-true_server.log
-    ├── openai_gpt-oss-20b_tp2_quant-off_eager-true_benchmark.log
-    └── ... (all log files)
+└── YYYYMMDD_HHMM/                                            # Timestamped run dir
+    ├── summary.txt                                           # Overall summary
+    ├── detailed_analysis.txt                                 # Detailed analysis
+    ├── results_summary.csv                                   # CSV export
+    ├── openai_gpt-oss-20b_tp2_quant-none_eager-true_results.json
+    ├── openai_gpt-oss-20b_tp2_quant-none_eager-false_results.json
+    ├── ... (all result files)
+    └── logs/
+        ├── openai_gpt-oss-20b_tp2_quant-none_eager-true_server.log
+        ├── openai_gpt-oss-20b_tp2_quant-none_eager-true_benchmark.log
+        └── ... (all log files)
 ```
 
 ## Configuration
@@ -92,7 +111,13 @@ experiment_results/
 Customize experiments using command-line options:
 
 ```bash
-# Test specific models
+# Sanity test with default settings
+./run_sanity_test.py
+
+# Sanity test overriding specific params
+./run_sanity_test.py --tp 4 --input-len 16 --num-prompts 8
+
+# Full run with specific models
 ./run_experiments.py --models openai/gpt-oss-20b Qwen/Qwen3-30B-A3B
 
 # Test specific tensor parallelism values
@@ -101,6 +126,9 @@ Customize experiments using command-line options:
 # Test specific quantization modes (use 'none' for no quantization)
 ./run_experiments.py --quantization none fp8
 
+# Override benchmark parameters directly
+./run_experiments.py --input-len 512 --output-len 512 --concurrency 16 --num-prompts 80
+
 # Adjust timeouts
 ./run_experiments.py --timeout-startup 600 --timeout-benchmark 3600
 
@@ -108,25 +136,34 @@ Customize experiments using command-line options:
 ./run_experiments.py --help
 ```
 
-Or edit defaults in [run_experiments.py](run_experiments.py):
+Default values (full run):
 
 ```python
-# Models to test
-default=[
-    'openai/gpt-oss-20b',
-    'Qwen/Qwen3-30B-A3B',
-    'Qwen/Qwen3-4B-Thinking-2507'
-]
+models          = ['openai/gpt-oss-20b', 'Qwen/Qwen3-30B-A3B', 'Qwen/Qwen3-4B-Thinking-2507']
+tp              = [2, 4, 8]
+quantization    = ['none', 'fp8']   # 'none' omits --quantization flag
+enforce_eager   = ['true', 'false']
+timeout_startup = 300               # 5 minutes
+timeout_benchmark = 1800            # 30 minutes
+input_len       = 1024
+output_len      = 1024
+concurrency     = 32
+num_prompts     = 160
+```
 
-# Tensor parallelism values
-default=[2, 4, 8]
+Default values (sanity test via `--sanity` / `run_sanity_test.py`):
 
-# Quantization options (use 'none' for no quantization)
-default=['none', 'fp8']
-
-# Timeouts
-timeout_startup=300     # 5 minutes for server startup
-timeout_benchmark=1800  # 30 minutes for benchmark
+```python
+models          = ['Qwen/Qwen3-4B-Thinking-2507']
+tp              = [2]
+quantization    = ['none', 'fp8']
+enforce_eager   = ['true', 'false']
+timeout_startup = 180
+timeout_benchmark = 300
+input_len       = 8
+output_len      = 8
+concurrency     = 2
+num_prompts     = 4
 ```
 
 ## Features
@@ -159,37 +196,45 @@ timeout_benchmark=1800  # 30 minutes for benchmark
 
 ## Monitoring
 
-### Watch Progress
-```bash
-tail -f experiment_results/logs/*_server.log
-```
-
 ### Check Current Status
 ```bash
-docker exec vllm-test ps aux | grep vllm
+./experiment_utils.py status
 ```
 
-### Monitor GPU Usage
+### Watch Live Logs (from inside the container)
 ```bash
-# In a separate terminal
+./experiment_utils.py logs
+# or directly:
+tail -f experiment_results/*/logs/*_server.log
+```
+
+### Monitor GPU Usage (separate terminal)
+```bash
 watch -n 1 'xpu-smi stats -d 3'
 ```
 
 ## Troubleshooting
 
-### Container Not Running
+### vLLM Not Found in PATH
+You are running outside the container. Enter it first:
 ```bash
-docker ps -a | grep vllm-test
-docker start vllm-test  # If stopped
+docker exec -it vllm-test bash
+cd /root/vllm-bench
 ```
 
 ### Stuck Experiments
 ```bash
-# Kill hanging vLLM processes
+# Kill hanging vLLM processes (run inside the container)
 ./experiment_utils.py stop
 
 # Restart the experiment script
 ./run_experiments.py
+```
+
+### Container Not Running
+```bash
+docker ps -a | grep vllm-test
+docker start vllm-test  # If stopped
 ```
 
 ### Disk Space Issues
@@ -244,13 +289,14 @@ cp -r experiment_results experiment_results_$(date +%Y%m%d_%H%M%S)
 
 ### Custom Benchmark Parameters
 
-Edit the `build_benchmark_command` method in [run_experiments.py](run_experiments.py):
+Use CLI flags (no code edits needed):
 
-```python
---random-input-len 1024     # Input token length
---random-output-len 1024    # Output token length
---max-concurrency 32        # Concurrent requests
---num-prompts 160           # Total number of prompts
+```bash
+./run_experiments.py \
+    --input-len 1024 \
+    --output-len 1024 \
+    --concurrency 32 \
+    --num-prompts 160
 ```
 
 ## Performance Tips
@@ -309,4 +355,7 @@ Logs Location: ./experiment_results/logs
 
 ## Questions?
 
-Check logs in `experiment_results/logs/` for detailed error messages and debugging information.
+Check logs in `experiment_results/<timestamp>/logs/` for detailed error messages and debugging information.
+
+Reference: [QUICK_REFERENCE.md](QUICK_REFERENCE.md)
+

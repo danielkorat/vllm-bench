@@ -1,179 +1,264 @@
 #!/usr/bin/env python3
 """
-Automated vLLM benchmarking experiment runner
-Runs all combinations of models, tensor parallelism, quantization, and eager mode
+Automated vLLM benchmarking experiment runner.
+
+Runs combinatorial benchmarks across models, tensor-parallelism, quantization
+and eager-mode settings.
+
+Designed to run *inside* the Docker container (intel/vllm:0.14.1-xpu).
+All commands are executed locally via bash – no docker exec wrappers needed.
+
+Usage:
+    ./run_experiments.py                     # full benchmark suite
+    ./run_experiments.py --sanity            # quick sanity check (small defaults)
+    ./run_experiments.py --models Qwen/...   # override any parameter
 """
 
 import subprocess
-import tempfile
+import shutil
 import os
 import time
 import json
 import argparse
+import threading
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import List, Dict, Optional, Tuple
-from experiment_common import Color, ExperimentConfig, ExperimentResult, Logger
+from typing import List, Optional
+from experiment_common import ExperimentConfig, ExperimentResult, Logger
 
+# ---------------------------------------------------------------------------
+# Default parameter sets
+# ---------------------------------------------------------------------------
+
+FULL_BENCH_DEFAULTS: dict = dict(
+    models=[
+        'openai/gpt-oss-20b',
+        'Qwen/Qwen3-30B-A3B',
+        'Qwen/Qwen3-4B-Thinking-2507',
+    ],
+    tp=[2, 4, 8],
+    quantization=['none', 'fp8'],
+    enforce_eager=['true', 'false'],
+    results_dir='./experiment_results',
+    timeout_startup=300,
+    timeout_benchmark=1800,
+    input_len=1024,
+    output_len=1024,
+    concurrency=32,
+    num_prompts=160,
+)
+
+SANITY_DEFAULTS: dict = dict(
+    models=['Qwen/Qwen3-4B-Thinking-2507'],
+    tp=[2],
+    quantization=['none', 'fp8'],
+    enforce_eager=['true', 'false'],
+    results_dir='./sanity_test_results',
+    timeout_startup=180,
+    timeout_benchmark=300,
+    input_len=8,
+    output_len=8,
+    concurrency=2,
+    num_prompts=4,
+)
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
 
 class VLLMExperimentRunner:
-    """Main experiment runner"""
-    
+    """
+    Experiment runner for vLLM benchmarks.
+
+    Runs *inside* the Docker container – all commands are executed locally via
+    ``bash``.  The caller is expected to be the process running inside the
+    container (e.g. launched via ``docker exec -it vllm-test bash``).
+    """
+
     def __init__(
         self,
-        container_name: str = "vllm-test",
         port: int = 8000,
-        results_dir: str = "./experiment_results",
+        results_dir: str = './experiment_results',
         timeout_startup: int = 300,
-        timeout_benchmark: int = 1800
+        timeout_benchmark: int = 1800,
+        input_len: int = 1024,
+        output_len: int = 1024,
+        concurrency: int = 32,
+        num_prompts: int = 160,
     ):
-        self.container_name = container_name
         self.port = port
-        
+        self.timeout_startup = timeout_startup
+        self.timeout_benchmark = timeout_benchmark
+        self.input_len = input_len
+        self.output_len = output_len
+        self.concurrency = concurrency
+        self.num_prompts = num_prompts
+
         # Create timestamped subdirectory in Israel Time
         israel_tz = ZoneInfo("Asia/Jerusalem")
         timestamp = datetime.now(israel_tz).strftime("%Y%m%d_%H%M")
-        base_results_dir = Path(results_dir)
-        self.results_dir = base_results_dir / timestamp
+        self.results_dir = Path(results_dir) / timestamp
         self.log_dir = self.results_dir / "logs"
-        
-        self.timeout_startup = timeout_startup
-        self.timeout_benchmark = timeout_benchmark
-        
-        # Create directories
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(exist_ok=True)
-        
+
         Logger.log(f"Results will be saved to: {self.results_dir}")
-        
-        # Tracking
+
         self.results: List[ExperimentResult] = []
-    
-    def docker_exec(
+        self._server_process: Optional[subprocess.Popen] = None
+
+    # ------------------------------------------------------------------
+    # Low-level execution helpers
+    # ------------------------------------------------------------------
+
+    def exec_local(
         self,
         command: str,
-        detached: bool = False,
         capture_output: bool = True,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
     ) -> subprocess.CompletedProcess:
-        """Execute command in Docker container"""
-        cmd = ["docker", "exec"]
-        if detached:
-            cmd.append("-d")
-        cmd.extend([self.container_name, "bash", "-c", command])
-        
+        """Run a shell command locally (we are inside the container)."""
+        cmd = ["bash", "-c", command]
         if capture_output:
-            return subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout
-            )
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         else:
             return subprocess.run(cmd, timeout=timeout)
-    
-    def check_container_running(self) -> bool:
-        """Check if container is running"""
-        try:
-            result = subprocess.run(
-                ["docker", "ps", "--filter", f"name={self.container_name}", "--format", "{{.Names}}"],
-                capture_output=True,
+
+    def _start_server_with_logging(
+        self,
+        cmd: List[str],
+        log_file: Path,
+    ) -> subprocess.Popen:
+        """Start the vLLM server in the background, tee-ing output to file + terminal."""
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self._server_process = process
+
+        def _tee(proc: subprocess.Popen, path: Path):
+            with open(path, 'w') as f:
+                for line in proc.stdout:
+                    print(line, end='', flush=True)
+                    f.write(line)
+                    f.flush()
+
+        threading.Thread(target=_tee, args=(process, log_file), daemon=True).start()
+        return process
+
+    def _run_with_logging(
+        self,
+        cmd: List[str],
+        log_file: Path,
+        timeout: Optional[int] = None,
+    ) -> subprocess.CompletedProcess:
+        """Run a command, printing output to terminal and saving to log_file."""
+        with open(log_file, 'w') as f:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=5
+                bufsize=1,
             )
-            return self.container_name in result.stdout
+            output_lines: List[str] = []
+            try:
+                for line in process.stdout:
+                    print(line, end='', flush=True)
+                    f.write(line)
+                    f.flush()
+                    output_lines.append(line)
+                returncode = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                raise
+        return subprocess.CompletedProcess(cmd, returncode, stdout=''.join(output_lines), stderr='')
+
+    # ------------------------------------------------------------------
+    # vLLM lifecycle
+    # ------------------------------------------------------------------
+
+    def check_environment(self) -> bool:
+        """Check that vLLM is available in PATH (i.e. we are inside the container)."""
+        try:
+            result = subprocess.run(["which", "vllm"], capture_output=True, text=True, timeout=5)
+            return result.returncode == 0
         except Exception:
             return False
-    
+
     def stop_vllm_server(self):
-        """Stop any running vLLM server and benchmark processes"""
+        """Kill any running vLLM server and benchmark processes."""
         Logger.log("Stopping any running vLLM server and benchmarks...")
-        try:
-            self.docker_exec("pkill -f 'vllm serve'", capture_output=False)
-        except subprocess.CalledProcessError:
-            pass  # It's OK if no process to kill
-        try:
-            self.docker_exec("pkill -f 'vllm bench'", capture_output=False)
-        except subprocess.CalledProcessError:
-            pass  # It's OK if no process to kill
+        if self._server_process is not None:
+            try:
+                self._server_process.kill()
+                self._server_process.wait(timeout=10)
+            except Exception:
+                pass
+            self._server_process = None
+        for pattern in ("'vllm serve'", "'vllm bench'"):
+            try:
+                self.exec_local(f"pkill -f {pattern}", capture_output=False)
+            except subprocess.CalledProcessError:
+                pass
         time.sleep(5)
-    
+
     def wait_for_server(self) -> bool:
-        """Wait for vLLM server to be ready"""
+        """Poll the health endpoint until the server is ready or timeout is reached."""
         Logger.log(f"Waiting for vLLM server to be ready (timeout: {self.timeout_startup}s)...")
-        
-        # First, wait a bit for process to initialize
         time.sleep(10)
-        
-        # Check if vllm process is running
+
+        # Verify process started
         try:
-            result = self.docker_exec("pgrep -f 'vllm serve' | head -1", timeout=5)
+            result = self.exec_local("pgrep -f 'vllm serve' | head -1", timeout=5)
             if result.returncode != 0 or not result.stdout.strip():
                 Logger.error("vLLM process not running!")
+                Logger.log("(Server output is printed directly to this terminal above)")
                 return False
             Logger.log(f"vLLM process detected (PID: {result.stdout.strip()})")
         except Exception as e:
             Logger.warning(f"Failed to check process: {e}")
-        
+
         elapsed = 10
         while elapsed < self.timeout_startup:
             try:
-                result = self.docker_exec(
-                    f"curl -f -s http://localhost:{self.port}/health",
-                    timeout=10
+                result = self.exec_local(
+                    f"curl -f -s http://localhost:{self.port}/health", timeout=10
                 )
                 if result.returncode == 0:
                     Logger.success("Server is ready!")
                     return True
             except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
                 pass
-            
+
             time.sleep(5)
             elapsed += 5
-            
+
             if elapsed % 30 == 0:
                 Logger.log(f"Still waiting... ({elapsed}s elapsed)")
-                # Check if process is still running
                 try:
-                    result = self.docker_exec("pgrep -f 'vllm serve'", timeout=5)
+                    result = self.exec_local("pgrep -f 'vllm serve'", timeout=5)
                     if result.returncode != 0:
                         Logger.error("vLLM process died during startup!")
+                        Logger.log("(Server output is printed directly to this terminal above)")
                         return False
                 except Exception:
                     pass
-        
+
         Logger.error(f"Server failed to start within {self.timeout_startup}s")
         return False
-    
-    
-    def _run_in_container_with_logging(
-        self,
-        script_path: str,
-        log_file: Path,
-        timeout: Optional[int] = None
-    ) -> Tuple[int, str]:
-        """Run command in container and capture output to file + terminal"""
-        result = subprocess.run(
-            ["docker", "exec", self.container_name, "bash", "--login", script_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout
-        )
-        
-        # Save output to log file
-        with open(log_file, 'w') as f:
-            f.write(result.stdout)
-        
-        # Also print to terminal
-        if result.stdout.strip():
-            print(result.stdout)
-        
-        return result.returncode, result.stdout
-    
+
+    # ------------------------------------------------------------------
+    # Command builders
+    # ------------------------------------------------------------------
+
     def build_vllm_command(self, config: ExperimentConfig) -> str:
-        """Build vLLM server command"""
+        """Build the 'vllm serve' command for the given config."""
         cmd_parts = [
             "VLLM_WORKER_MULTIPROC_METHOD=spawn vllm serve",
             config.model,
@@ -197,328 +282,247 @@ class VLLMExperimentRunner:
             cmd_parts.append(f"--quantization {config.quantization}")
         
         return " ".join(cmd_parts)
-    
+
     def build_benchmark_command(self, config: ExperimentConfig) -> str:
-        """Build benchmark command"""
-        return f"""vllm bench serve \
-            --host 0.0.0.0 \
-            --port {self.port} \
-            --model {config.model} \
-            --trust-remote-code \
-            --dataset-name random \
-            --random-input-len 1024 \
-            --random-output-len 1024 \
-            --ignore-eos \
-            --max-concurrency 32 \
-            --num-prompts 160 \
-            --num-warmup 3 \
-            --save-result --result-filename /tmp/benchmark_result.json"""
+        """Build the 'vllm bench serve' command for the given config."""
+        return (
+            f"vllm bench serve"
+            f" --host 0.0.0.0"
+            f" --port {self.port}"
+            f" --model {config.model}"
+            f" --trust-remote-code"
+            f" --dataset-name random"
+            f" --random-input-len {self.input_len}"
+            f" --random-output-len {self.output_len}"
+            f" --ignore-eos"
+            f" --max-concurrency {self.concurrency}"
+            f" --num-prompts {self.num_prompts}"
+            f" --num-warmup 3"
+            f" --save-result --result-filename /tmp/benchmark_result.json"
+        )
     
+    # ------------------------------------------------------------------
+    # Experiment execution
+    # ------------------------------------------------------------------
+
     def run_experiment(self, config: ExperimentConfig) -> ExperimentResult:
-        """Run a single experiment"""
+        """Run a single experiment (server + benchmark) for the given config."""
         Logger.log("=" * 72)
         Logger.log(f"Starting experiment: {config.name}")
-        Logger.log(f"Model: {config.model}")
-        Logger.log(f"Tensor Parallelism: {config.tp}")
-        Logger.log(f"Quantization: {config.quantization or 'none'}")
-        Logger.log(f"Enforce Eager: {config.enforce_eager}")
+        Logger.log(f"  Model:            {config.model}")
+        Logger.log(f"  Tensor Parallel:  {config.tp}")
+        Logger.log(f"  Quantization:     {config.quantization or 'none'}")
+        Logger.log(f"  Enforce Eager:    {config.enforce_eager}")
+        Logger.log(f"  Input/Output len: {self.input_len}/{self.output_len}")
+        Logger.log(f"  Concurrency:      {self.concurrency}  Prompts: {self.num_prompts}")
         Logger.log("=" * 72)
-        
+
         start_time = time.time()
-        
-        # Prepare log files
         server_log = self.log_dir / f"{config.name}_server.log"
         benchmark_log = self.log_dir / f"{config.name}_benchmark.log"
         result_file = self.results_dir / f"{config.name}_results.json"
-        
-        # Stop any existing server
+
         self.stop_vllm_server()
-        
-        # Start vLLM server
+
+        # ---- Start vLLM server ----
         Logger.log("Starting vLLM server...")
-        Logger.log(f"Server logs will be saved to: {server_log}")
+        Logger.log(f"Server logs: {server_log}")
         vllm_cmd = self.build_vllm_command(config)
-        
         try:
-            self.docker_exec(
-                f"{vllm_cmd} > /tmp/vllm_server.log 2>&1",
-                detached=True
-            )
+            server_script = "/tmp/start_vllm_server.sh"
+            with open(server_script, 'w') as f:
+                f.write("\n".join([
+                    "#!/bin/bash",
+                    "source /opt/intel/oneapi/setvars.sh --force",
+                    "export no_proxy=localhost,127.0.0.1,0.0.0.0",
+                    "export NO_PROXY=localhost,127.0.0.1,0.0.0.0",
+                    vllm_cmd,
+                ]) + "\n")
+            os.chmod(server_script, 0o755)
+            self._start_server_with_logging(["bash", "--login", server_script], server_log)
         except Exception as e:
             Logger.error(f"Failed to start server: {e}")
             return ExperimentResult(
-                config=config,
-                success=False,
+                config=config, success=False,
                 error_message=f"Server start failed: {e}",
-                duration=time.time() - start_time
+                duration=time.time() - start_time,
             )
-        
-        # Wait for server to be ready
+
+        # ---- Wait for server ----
         if not self.wait_for_server():
-            # Save server logs
-            try:
-                result = self.docker_exec("cat /tmp/vllm_server.log")
-                server_log.write_text(result.stdout)
-                Logger.log(f"Server logs saved to: {server_log}")
-                # Also print for debugging
-                if result.stdout.strip():
-                    Logger.error("=" * 72)
-                    Logger.error("Server output:")
-                    Logger.error("-" * 72)
-                    print(result.stdout)
-                    Logger.error("=" * 72)
-            except Exception:
-                pass
-            
             self.stop_vllm_server()
             return ExperimentResult(
-                config=config,
-                success=False,
+                config=config, success=False,
                 error_message="Server startup timeout",
-                duration=time.time() - start_time
+                duration=time.time() - start_time,
             )
-        
-        # Save server logs
-        try:
-            result = self.docker_exec("cat /tmp/vllm_server.log")
-            server_log.write_text(result.stdout)
-            Logger.success(f"Server logs saved to: {server_log}")
-        except Exception:
-            pass
-        
-        # Run benchmark
+
+        # ---- Run benchmark ----
         Logger.log("Running benchmark...")
-        Logger.log(f"Benchmark logs will be saved to: {benchmark_log}")
+        Logger.log(f"Benchmark logs: {benchmark_log}")
         benchmark_cmd = self.build_benchmark_command(config)
-        
+        Logger.log(f"Benchmark command: {benchmark_cmd}")
+
         try:
-            # Write benchmark to a shell script, copy into container, run with
-            # bash --login so /etc/profile -> /etc/bash.bashrc -> oneAPI is loaded.
-            # This exactly mirrors what happens in: docker exec -it vllm-test bash
-            script_content = "\n".join([
-                "#!/bin/bash",
-                "source /etc/bash.bashrc",  # load oneAPI environment
-                "export no_proxy=localhost,127.0.0.1,0.0.0.0",
-                "export NO_PROXY=localhost,127.0.0.1,0.0.0.0",
-                "export HTTP_PROXY=",
-                "export HTTPS_PROXY=",
-                "export http_proxy=",
-                "export https_proxy=",
-                benchmark_cmd,
-            ]) + "\n"
-            Logger.log(f"Benchmark command: {benchmark_cmd}")
+            bench_script = "/tmp/run_benchmark.sh"
+            with open(bench_script, 'w') as f:
+                f.write("\n".join([
+                    "#!/bin/bash",
+                    "source /opt/intel/oneapi/setvars.sh --force",
+                    "export no_proxy=localhost,127.0.0.1,0.0.0.0",
+                    "export NO_PROXY=localhost,127.0.0.1,0.0.0.0",
+                    benchmark_cmd,
+                ]) + "\n")
+            os.chmod(bench_script, 0o755)
 
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-                f.write(script_content)
-                local_script = f.name
-            try:
-                subprocess.run(
-                    ["docker", "cp", local_script, f"{self.container_name}:/tmp/run_benchmark.sh"],
-                    check=True, timeout=10
-                )
-            finally:
-                os.unlink(local_script)
-
-            subprocess.run(
-                ["docker", "exec", self.container_name, "chmod", "+x", "/tmp/run_benchmark.sh"],
-                check=True, timeout=5
-            )
-
-            # Run benchmark and capture output
-            returncode, stdout = self._run_in_container_with_logging(
-                "/tmp/run_benchmark.sh",
+            result = self._run_with_logging(
+                ["bash", "--login", bench_script],
                 benchmark_log,
-                timeout=self.timeout_benchmark
+                timeout=self.timeout_benchmark,
             )
-            
-            if returncode != 0:
-                raise subprocess.CalledProcessError(returncode, benchmark_cmd)
-            
-            # Copy result file from container
-            copy_result = subprocess.run(
-                ["docker", "cp", f"{self.container_name}:/tmp/benchmark_result.json", str(result_file)],
-                capture_output=True,
-                timeout=30
-            )
-            
-            if copy_result.returncode != 0:
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, benchmark_cmd)
+
+            # Copy result from /tmp to results dir
+            src = Path("/tmp/benchmark_result.json")
+            if not src.exists():
                 raise Exception("Benchmark result file not found")
-            
-            # Rewrite as pretty-printed JSON for readability
+            shutil.copy(src, result_file)
+            src.unlink(missing_ok=True)
+
+            # Pretty-print JSON
             try:
                 with open(result_file) as f:
-                    _raw = json.load(f)
+                    raw = json.load(f)
                 with open(result_file, 'w') as f:
-                    json.dump(_raw, f, indent=2)
+                    json.dump(raw, f, indent=2)
             except Exception:
                 pass
-            
-            # Clean up container temp file
-            try:
-                self.docker_exec("rm -f /tmp/benchmark_result.json")
-            except Exception:
-                pass
-            
-            Logger.success(f"Benchmark logs saved to: {benchmark_log}")
-            Logger.success(f"Experiment completed successfully: {config.name}")
-            
-            # Extract key metrics if possible
-            try:
-                with open(result_file) as f:
-                    data = json.load(f)
-                # Check if benchmark actually succeeded
-                failed_requests = data.get('failed', 0)
-                successful_requests = data.get('completed', 0)
-                
-                if failed_requests > 0 or successful_requests == 0:
-                    raise Exception(f"Benchmark had {failed_requests} failures, {successful_requests} successes")
-                
-                throughput = data.get('request_throughput', 'N/A')
-                latency = data.get('mean_ttft_ms', 'N/A')
-                Logger.log(f"Requests: {successful_requests}, Throughput: {throughput} req/s, TTFT: {latency} ms")
-            except Exception as e:
-                Logger.error(f"Benchmark validation failed: {e}")
-                raise
-            
-            duration = time.time() - start_time
-            return ExperimentResult(config=config, success=True, duration=duration)
-            
+
+            # Validate benchmark succeeded
+            with open(result_file) as f:
+                data = json.load(f)
+            failed_req = data.get('failed', 0)
+            ok_req = data.get('completed', 0)
+            if failed_req > 0 or ok_req == 0:
+                raise Exception(f"Benchmark had {failed_req} failures, {ok_req} successes")
+
+            throughput = data.get('request_throughput', 'N/A')
+            latency = data.get('mean_ttft_ms', 'N/A')
+            Logger.success(f"Experiment completed: {config.name}")
+            Logger.log(f"Requests: {ok_req}, Throughput: {throughput} req/s, TTFT: {latency} ms")
+            return ExperimentResult(config=config, success=True, duration=time.time() - start_time)
+
         except subprocess.TimeoutExpired:
             Logger.error(f"Benchmark timed out for {config.name}")
             return ExperimentResult(
-                config=config,
-                success=False,
+                config=config, success=False,
                 error_message="Benchmark timeout",
-                duration=time.time() - start_time
+                duration=time.time() - start_time,
             )
         except Exception as e:
             Logger.error(f"Benchmark failed for {config.name}: {e}")
             return ExperimentResult(
-                config=config,
-                success=False,
+                config=config, success=False,
                 error_message=f"Benchmark failed: {e}",
                 duration=time.time() - start_time
             )
         finally:
             self.stop_vllm_server()
-            time.sleep(10)  # Brief pause between experiments
-    
-    def run_all_experiments(
+            time.sleep(5)
+
+    def run_all(
         self,
         models: List[str],
         tp_values: List[int],
         quantization_options: List[Optional[str]],
-        enforce_eager_options: List[bool]
-    ):
-        """Run all experiment combinations"""
-        
-        # Check container
-        if not self.check_container_running():
-            Logger.error(f"Container {self.container_name} is not running!")
-            Logger.log("Please start the container first")
+        enforce_eager_options: List[bool],
+    ) -> bool:
+        """Run all experiment combinations, skipping known-bad configs."""
+        if not self.check_environment():
+            Logger.error("vLLM command not found in PATH!")
+            Logger.log("Ensure you are running inside the container with oneAPI loaded.")
             return False
-        
-        # Generate all configurations
+
         configs = []
         for model in models:
             for tp in tp_values:
                 for quant in quantization_options:
                     for eager in enforce_eager_options:
-                        # Skip fp8 + eager=false (known to fail)
+                        # Skip fp8 + eager=false (known vLLM engine failure)
                         if quant == 'fp8' and not eager:
-                            Logger.warning(f"Skipping {model} tp={tp} quant=fp8 eager=false (known failure)")
+                            Logger.warning(
+                                f"Skipping {model} tp={tp} quant=fp8 eager=false (known failure)"
+                            )
                             continue
                         configs.append(ExperimentConfig(
-                            model=model,
-                            tp=tp,
-                            quantization=quant,
-                            enforce_eager=eager
+                            model=model, tp=tp, quantization=quant, enforce_eager=eager
                         ))
-        
-        Logger.log(f"Starting automated vLLM experiments")
-        Logger.log(f"Results will be saved to: {self.results_dir}")
-        Logger.log(f"Total experiments to run: {len(configs)}")
-        
+
+        Logger.log(f"Starting vLLM experiments — {len(configs)} configurations")
+        Logger.log(f"Results: {self.results_dir}")
         start_time = time.time()
-        
-        # Run all experiments
+
         for i, config in enumerate(configs, 1):
             Logger.log(f"\nExperiment {i}/{len(configs)}")
-            result = self.run_experiment(config)
-            self.results.append(result)
-        
-        duration = time.time() - start_time
-        
-        # Generate summary
-        self.generate_summary(duration)
-        
+            self.results.append(self.run_experiment(config))
+
+        self.generate_summary(time.time() - start_time)
         return all(r.success for r in self.results)
-    
+
     def generate_summary(self, total_duration: float):
-        """Generate summary report"""
+        """Write and print a summary report of all results."""
         Logger.log("=" * 72)
-        Logger.log("Generating summary report...")
-        Logger.log("=" * 72)
-        
-        total_runs = len(self.results)
-        successful_runs = sum(1 for r in self.results if r.success)
-        failed_runs = total_runs - successful_runs
-        success_rate = (successful_runs / total_runs * 100) if total_runs > 0 else 0
-        
-        hours = int(total_duration // 3600)
-        minutes = int((total_duration % 3600) // 60)
-        seconds = int(total_duration % 60)
-        
+        total = len(self.results)
+        ok = sum(1 for r in self.results if r.success)
+        fail = total - ok
+        rate = (ok / total * 100) if total else 0
+        h = int(total_duration // 3600)
+        m = int((total_duration % 3600) // 60)
+        s = int(total_duration % 60)
+
+        lines = [
+            "vLLM Benchmark Summary",
+            "=" * 72,
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            f"  Benchmark params: input={self.input_len} output={self.output_len}"
+            f"  concurrency={self.concurrency}  prompts={self.num_prompts}",
+            "",
+            f"Total Experiments: {total}",
+            f"Successful:        {ok}",
+            f"Failed:            {fail}",
+            f"Success Rate:      {rate:.2f}%",
+            "",
+            f"Total Duration: {h}h {m}m {s}s",
+            "",
+        ]
+
+        successful = [r for r in self.results if r.success]
+        if successful:
+            lines += ["Successful Experiments:", "-" * 72]
+            lines += [f"  ✓ {r.config.name}  ({r.duration:.1f}s)" for r in successful]
+            lines.append("")
+
+        failed = [r for r in self.results if not r.success]
+        if failed:
+            lines += ["Failed Experiments:", "-" * 72]
+            lines += [f"  ✗ {r.config.name}  ({r.error_message})" for r in failed]
+            lines.append("")
+
+        lines += [f"Results: {self.results_dir}", f"Logs:    {self.log_dir}"]
+
+        summary_text = "\n".join(lines)
         summary_file = self.results_dir / "summary.txt"
-        
-        with open(summary_file, 'w') as f:
-            lines = [
-                "vLLM Benchmark Experiment Summary",
-                "=" * 72,
-                f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                "",
-                f"Total Experiments: {total_runs}",
-                f"Successful: {successful_runs}",
-                f"Failed: {failed_runs}",
-                f"Success Rate: {success_rate:.2f}%",
-                "",
-                f"Total Duration: {hours}h {minutes}m {seconds}s",
-                ""
-            ]
-            
-            successful = [r for r in self.results if r.success]
-            if successful:
-                lines.append("Successful Experiments:")
-                lines.append("-" * 72)
-                for result in successful:
-                    lines.append(f"  ✓ {result.config.name}")
-                lines.append("")
-            
-            failed = [r for r in self.results if not r.success]
-            if failed:
-                lines.append("Failed Experiments:")
-                lines.append("-" * 72)
-                for result in failed:
-                    lines.append(f"  ✗ {result.config.name} ({result.error_message})")
-                lines.append("")
-            
-            lines.extend([
-                f"Results Location: {self.results_dir}",
-                f"Logs Location: {self.log_dir}"
-            ])
-            
-            summary_text = "\n".join(lines)
-            f.write(summary_text)
-            print(summary_text)
-        
+        summary_file.write_text(summary_text)
+        print(summary_text)
         Logger.success(f"Summary saved to: {summary_file}")
-        
-        if failed_runs == 0:
+
+        if fail == 0:
             Logger.success("All experiments succeeded! 🎉")
         else:
             Logger.warning("Some experiments failed. Check logs for details.")
-        
-        # Automatically run analysis on completed results
+
         Logger.log("Running analysis on results...")
         try:
             import analyze_results as ar
@@ -527,79 +531,68 @@ class VLLMExperimentRunner:
             Logger.warning(f"Analysis failed: {e}")
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(
-        description='Automated vLLM benchmarking experiments'
+        description='Automated vLLM benchmarking experiments (runs inside the container)',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        '--models',
-        nargs='+',
-        default=[
-            'openai/gpt-oss-20b',
-            'Qwen/Qwen3-30B-A3B',
-            'Qwen/Qwen3-4B-Thinking-2507'
-        ],
-        help='Models to benchmark'
+        '--sanity', action='store_true',
+        help='Run minimal sanity test with small defaults '
+             '(single small model, tp=2, 8-token I/O, 4 prompts)',
+    )
+    parser.add_argument('--models', nargs='+', help='Models to benchmark')
+    parser.add_argument('--tp', nargs='+', type=int, help='Tensor parallelism values')
+    parser.add_argument(
+        '--quantization', nargs='+',
+        help='Quantization modes; use "none" to omit the --quantization flag',
     )
     parser.add_argument(
-        '--tp',
-        nargs='+',
-        type=int,
-        default=[2, 4, 8],
-        help='Tensor parallelism values'
+        '--enforce-eager', nargs='+', choices=['true', 'false'],
+        help='Eager execution modes to test',
     )
-    parser.add_argument(
-        '--quantization',
-        nargs='+',
-        default=['none', 'fp8'],
-        help='Quantization modes (use "none" for no quantization)'
-    )
-    parser.add_argument(
-        '--enforce-eager',
-        nargs='+',
-        choices=['true', 'false'],
-        default=['true', 'false'],
-        help='Enforce eager execution modes to test (default: both)'
-    )
-    parser.add_argument(
-        '--container',
-        help='Results directory'
-    )
-    parser.add_argument(
-        '--timeout-startup',
-        type=int,
-        default=300,
-        help='Server startup timeout in seconds'
-    )
-    parser.add_argument(
-        '--timeout-benchmark',
-        type=int,
-        default=1800,
-        help='Benchmark timeout in seconds'
-    )
-    
+    parser.add_argument('--results-dir', help='Results base directory')
+    parser.add_argument('--timeout-startup', type=int, help='Server startup timeout (s)')
+    parser.add_argument('--timeout-benchmark', type=int, help='Benchmark timeout (s)')
+    parser.add_argument('--input-len', type=int, help='Random input token length')
+    parser.add_argument('--output-len', type=int, help='Random output token length')
+    parser.add_argument('--concurrency', type=int, help='Max concurrent requests')
+    parser.add_argument('--num-prompts', type=int, help='Total number of prompts')
+    parser.add_argument('--port', type=int, default=8000, help='vLLM server port')
+
     args = parser.parse_args()
-    
-    # Convert 'none' to None for quantization
-    quant_options = [None if q == 'none' else q for q in args.quantization]
-    
-    # Convert eager strings to booleans
-    eager_options = [e == 'true' for e in args.enforce_eager]
-    
+
+    # Select default set based on mode
+    D = SANITY_DEFAULTS if args.sanity else FULL_BENCH_DEFAULTS
+
+    def get(attr: str, key: str):
+        val = getattr(args, attr, None)
+        return val if val is not None else D[key]
+
+    quant_options = [None if q == 'none' else q for q in get('quantization', 'quantization')]
+    eager_options = [e == 'true' for e in get('enforce_eager', 'enforce_eager')]
+
     runner = VLLMExperimentRunner(
-        container_name=args.container,
-        results_dir=args.results_dir,
-        timeout_startup=args.timeout_startup,
-        timeout_benchmark=args.timeout_benchmark
+        port=args.port,
+        results_dir=get('results_dir', 'results_dir'),
+        timeout_startup=get('timeout_startup', 'timeout_startup'),
+        timeout_benchmark=get('timeout_benchmark', 'timeout_benchmark'),
+        input_len=get('input_len', 'input_len'),
+        output_len=get('output_len', 'output_len'),
+        concurrency=get('concurrency', 'concurrency'),
+        num_prompts=get('num_prompts', 'num_prompts'),
     )
-    
-    success = runner.run_all_experiments(
-        models=args.models,
-        tp_values=args.tp,
+
+    success = runner.run_all(
+        models=get('models', 'models'),
+        tp_values=get('tp', 'tp'),
         quantization_options=quant_options,
-        enforce_eager_options=eager_options
+        enforce_eager_options=eager_options,
     )
-    
     return 0 if success else 1
 
 
